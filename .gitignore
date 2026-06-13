@@ -1,0 +1,12 @@
+# Recordings
+*.mp4
+*.mkv
+*.tmp.mp4
+
+# Secrets and tokens - never commit these
+client_secrets.json
+token.json
+
+# Python
+__pycache__/
+*.pyc
