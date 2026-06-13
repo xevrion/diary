@@ -407,6 +407,12 @@ class DiaryWindow(Gtk.ApplicationWindow):
         .status-label.success {
             color: #6fbf73;
         }
+
+        .dialog-field-label {
+            font-size: 11px;
+            color: #8a8a8a;
+            letter-spacing: 0.5px;
+        }
         """
         provider = Gtk.CssProvider()
         provider.load_from_data(css)
@@ -727,7 +733,7 @@ class DiaryWindow(Gtk.ApplicationWindow):
         if self.video_device_ok:
             self._start_preview()
 
-        self._trigger_upload(self.current_output_path)
+        self._show_post_recording_dialog(self.current_output_path)
 
     # ------------------------------------------------------------------
     # Audio recording pipeline
@@ -828,7 +834,7 @@ class DiaryWindow(Gtk.ApplicationWindow):
             if os.path.exists(audio_temp_path):
                 os.remove(audio_temp_path)
 
-        GLib.idle_add(self._trigger_upload, final_path)
+        GLib.idle_add(self._show_post_recording_dialog, final_path)
 
     # ------------------------------------------------------------------
     # Pipeline teardown helper (ensure EOS is written so mp4 is valid)
@@ -859,19 +865,106 @@ class DiaryWindow(Gtk.ApplicationWindow):
         )
 
     # ------------------------------------------------------------------
+    # Post-recording dialog
+    # ------------------------------------------------------------------
+    def _default_title_for(self, file_path):
+        filename = os.path.basename(file_path)
+        timestamp = filename.rsplit(".", 1)[0]
+        # filename format: YYYY-MM-DD_HH-MM
+        try:
+            date_part, time_part = timestamp.split("_")
+            display_time = time_part.replace("-", ":")
+            return f"diary — {date_part} {display_time}"
+        except ValueError:
+            return f"diary — {timestamp}"
+
+    def _show_post_recording_dialog(self, file_path):
+        dialog = Gtk.Dialog(
+            title="diary entry",
+            transient_for=self,
+            modal=True,
+        )
+        dialog.add_css_class("post-recording-dialog")
+        dialog.set_default_size(420, 0)
+
+        save_button = dialog.add_button("save locally only", Gtk.ResponseType.REJECT)
+        save_button.add_css_class("flat")
+        upload_button = dialog.add_button("upload to youtube", Gtk.ResponseType.ACCEPT)
+        upload_button.add_css_class("flat")
+        upload_button.add_css_class("suggested-action")
+
+        content = dialog.get_content_area()
+        content.set_orientation(Gtk.Orientation.VERTICAL)
+        content.set_spacing(8)
+        content.set_margin_top(12)
+        content.set_margin_bottom(12)
+        content.set_margin_start(12)
+        content.set_margin_end(12)
+
+        title_label = Gtk.Label(label="title", halign=Gtk.Align.START)
+        title_label.add_css_class("dialog-field-label")
+        content.append(title_label)
+
+        title_entry = Gtk.Entry()
+        title_entry.set_text(self._default_title_for(file_path))
+        content.append(title_entry)
+
+        desc_label = Gtk.Label(label="description", halign=Gtk.Align.START)
+        desc_label.add_css_class("dialog-field-label")
+        desc_label.set_margin_top(4)
+        content.append(desc_label)
+
+        desc_view = Gtk.TextView()
+        desc_view.set_wrap_mode(Gtk.WrapMode.WORD)
+        desc_scroller = Gtk.ScrolledWindow()
+        desc_scroller.set_min_content_height(80)
+        desc_scroller.set_child(desc_view)
+        content.append(desc_scroller)
+
+        def on_response(dlg, response):
+            title = title_entry.get_text().strip() or self._default_title_for(file_path)
+            buf = desc_view.get_buffer()
+            description = buf.get_text(
+                buf.get_start_iter(), buf.get_end_iter(), False
+            )
+
+            if response == Gtk.ResponseType.ACCEPT:
+                self._trigger_upload(file_path, title, description)
+            else:
+                self._on_saved_locally(file_path)
+
+            dlg.destroy()
+
+        dialog.connect("response", on_response)
+        dialog.present()
+
+    def _on_saved_locally(self, file_path):
+        filename = os.path.basename(file_path)
+        self.status_label.remove_css_class("error")
+        self.status_label.add_css_class("success")
+        self.status_label.set_label("saved locally ✓")
+        notify("Diary", f"Saved locally (not uploaded): {filename}")
+        GLib.timeout_add(3000, self._clear_status_label)
+
+    # ------------------------------------------------------------------
     # Upload
     # ------------------------------------------------------------------
-    def _trigger_upload(self, file_path):
+    def _trigger_upload(self, file_path, title=None, description=""):
         self.status_label.remove_css_class("error")
         self.status_label.remove_css_class("success")
         self.status_label.set_label("uploading...")
 
+        if title is None:
+            title = self._default_title_for(file_path)
+
         threading.Thread(
-            target=self._upload_worker, args=(file_path,), daemon=True
+            target=self._upload_worker,
+            args=(file_path, title, description),
+            daemon=True,
         ).start()
         return False
 
-    def _upload_worker(self, file_path):
+    def _upload_worker(self, file_path, title, description):
         try:
             import upload as upload_module
         except ImportError as e:
@@ -886,21 +979,11 @@ class DiaryWindow(Gtk.ApplicationWindow):
             )
             return
 
-        filename = os.path.basename(file_path)
-        timestamp = filename.rsplit(".", 1)[0]
-        # filename format: YYYY-MM-DD_HH-MM
-        try:
-            date_part, time_part = timestamp.split("_")
-            display_time = time_part.replace("-", ":")
-            title = f"diary — {date_part} {display_time}"
-        except ValueError:
-            title = f"diary — {timestamp}"
-
         try:
             upload_module.upload_video(
                 file_path,
                 title=title,
-                description="",
+                description=description,
                 privacy_status="private",
                 category_id="22",
             )
