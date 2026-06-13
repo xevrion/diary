@@ -7,7 +7,6 @@ result to YouTube as a private video.
 """
 
 import json
-import math
 import os
 import subprocess
 import threading
@@ -74,24 +73,6 @@ def has_audio_input():
         src.set_state(Gst.State.NULL)
 
 
-def list_video_devices():
-    """Return a list of (display_name, /dev/videoN path) for cameras."""
-    monitor = Gst.DeviceMonitor.new()
-    monitor.add_filter("Video/Source", None)
-    monitor.start()
-    devices = []
-    try:
-        for dev in monitor.get_devices():
-            props = dev.get_properties()
-            path = props.get_value("api.v4l2.path") if props else None
-            if not path:
-                continue
-            devices.append((dev.get_display_name(), path))
-    finally:
-        monitor.stop()
-    return devices
-
-
 def list_audio_input_devices():
     """Return a list of (display_name, pulse_node_name) for microphones."""
     monitor = Gst.DeviceMonitor.new()
@@ -135,14 +116,15 @@ class DiaryWindow(Gtk.ApplicationWindow):
         self.waveform_history = [0.0] * 120
 
         # Device enumeration
-        self.video_devices = list_video_devices()
+        self.selected_video_device = VIDEO_DEVICE
         self.audio_devices = list_audio_input_devices()
-        self.selected_video_device = (
-            self.video_devices[0][1] if self.video_devices else VIDEO_DEVICE
-        )
         self.selected_audio_device = (
             self.audio_devices[0][1] if self.audio_devices else None
         )
+
+        # Blinking record indicator state
+        self.blink_visible = True
+        self.blink_source_id = None
 
         self._build_ui()
         self._apply_css()
@@ -166,8 +148,8 @@ class DiaryWindow(Gtk.ApplicationWindow):
             else:
                 self.mode = "video"
 
-        self.video_mode_btn.set_sensitive(self.video_device_ok)
-        self.audio_mode_btn.set_sensitive(self.audio_device_ok)
+        self.video_mode_label.set_sensitive(self.video_device_ok)
+        self.audio_mode_label.set_sensitive(self.audio_device_ok)
 
         self._update_mode_ui()
 
@@ -187,225 +169,179 @@ class DiaryWindow(Gtk.ApplicationWindow):
     # ------------------------------------------------------------------
     def _build_ui(self):
         root = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=0)
-        root.set_margin_top(12)
-        root.set_margin_bottom(12)
-        root.set_margin_start(12)
-        root.set_margin_end(12)
         self.set_child(root)
 
-        # Header
-        header = Gtk.Label(label="diary")
-        header.set_halign(Gtk.Align.START)
-        header.add_css_class("diary-header")
-        root.append(header)
+        # Title
+        title_label = Gtk.Label(label="diary")
+        title_label.set_halign(Gtk.Align.START)
+        title_label.add_css_class("title-label")
+        title_label.set_margin_start(14)
+        title_label.set_margin_top(14)
+        root.append(title_label)
+
+        # Overlay: full-bleed preview/waveform with bottom bar floating on top
+        self.overlay = Gtk.Overlay()
+        self.overlay.set_vexpand(True)
+        self.overlay.set_hexpand(True)
+        root.append(self.overlay)
 
         # Main area (stack between video preview and waveform)
         self.main_stack = Gtk.Stack()
         self.main_stack.set_vexpand(True)
         self.main_stack.set_hexpand(True)
-        self.main_stack.set_margin_top(10)
-        self.main_stack.set_margin_bottom(10)
-        root.append(self.main_stack)
+        self.overlay.set_child(self.main_stack)
 
         # Video preview widget
         self.preview_picture = Gtk.Picture()
         self.preview_picture.set_can_shrink(True)
-        self.preview_picture.set_content_fit(Gtk.ContentFit.CONTAIN)
-        video_frame = Gtk.Box()
-        video_frame.add_css_class("main-area")
-        video_frame.append(self.preview_picture)
+        self.preview_picture.set_content_fit(Gtk.ContentFit.COVER)
         self.preview_picture.set_hexpand(True)
         self.preview_picture.set_vexpand(True)
-        self.main_stack.add_named(video_frame, "video")
+        self.main_stack.add_named(self.preview_picture, "video")
 
         # Audio waveform area
         self.waveform_area = Gtk.DrawingArea()
         self.waveform_area.set_draw_func(self._draw_waveform)
-        self.waveform_area.add_css_class("main-area")
         self.main_stack.add_named(self.waveform_area, "audio")
 
-        # Bottom bar
+        # Bottom bar, overlaid on top of the preview
         bottom_bar = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=0)
-        bottom_bar.set_margin_top(4)
-        root.append(bottom_bar)
+        bottom_bar.add_css_class("bottom-bar")
+        bottom_bar.set_hexpand(True)
+        bottom_bar.set_valign(Gtk.Align.END)
+        bottom_bar.set_halign(Gtk.Align.FILL)
+        bottom_bar.set_size_request(-1, 64)
+        self.overlay.add_overlay(bottom_bar)
 
-        # Left: mode toggle
-        mode_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=12)
+        # Left: mode toggles
+        mode_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=18)
         mode_box.set_hexpand(True)
         mode_box.set_halign(Gtk.Align.START)
         mode_box.set_valign(Gtk.Align.CENTER)
+        mode_box.set_margin_start(20)
 
-        self.video_mode_btn = Gtk.Button(label="video")
-        self.video_mode_btn.add_css_class("mode-button")
-        self.video_mode_btn.add_css_class("flat")
-        self.video_mode_btn.connect("clicked", self._on_mode_clicked, "video")
-        mode_box.append(self.video_mode_btn)
+        self.video_mode_label = Gtk.Label(label="video")
+        self.video_mode_label.add_css_class("mode-active")
+        video_click = Gtk.GestureClick()
+        video_click.connect("released", self._on_mode_clicked, "video")
+        self.video_mode_label.add_controller(video_click)
+        mode_box.append(self.video_mode_label)
 
-        self.audio_mode_btn = Gtk.Button(label="audio")
-        self.audio_mode_btn.add_css_class("mode-button")
-        self.audio_mode_btn.add_css_class("flat")
-        self.audio_mode_btn.connect("clicked", self._on_mode_clicked, "audio")
-        mode_box.append(self.audio_mode_btn)
-
-        # Device selector dropdowns (one shown per mode)
-        self.device_stack = Gtk.Stack()
-        self.device_stack.set_valign(Gtk.Align.CENTER)
-
-        video_names = [name for name, _path in self.video_devices] or ["no camera"]
-        self.video_device_model = Gtk.StringList.new(video_names)
-        self.video_device_dropdown = Gtk.DropDown(model=self.video_device_model)
-        self.video_device_dropdown.add_css_class("device-dropdown")
-        self.video_device_dropdown.set_sensitive(bool(self.video_devices))
-        self.video_device_dropdown.connect(
-            "notify::selected", self._on_video_device_changed
-        )
-        self.device_stack.add_named(self.video_device_dropdown, "video")
-
-        audio_names = [name for name, _node in self.audio_devices] or ["no microphone"]
-        self.audio_device_model = Gtk.StringList.new(audio_names)
-        self.audio_device_dropdown = Gtk.DropDown(model=self.audio_device_model)
-        self.audio_device_dropdown.add_css_class("device-dropdown")
-        self.audio_device_dropdown.set_sensitive(bool(self.audio_devices))
-        self.audio_device_dropdown.connect(
-            "notify::selected", self._on_audio_device_changed
-        )
-        self.device_stack.add_named(self.audio_device_dropdown, "audio")
-
-        mode_box.append(self.device_stack)
+        self.audio_mode_label = Gtk.Label(label="audio")
+        self.audio_mode_label.add_css_class("mode-inactive")
+        audio_click = Gtk.GestureClick()
+        audio_click.connect("released", self._on_mode_clicked, "audio")
+        self.audio_mode_label.add_controller(audio_click)
+        mode_box.append(self.audio_mode_label)
 
         bottom_bar.append(mode_box)
 
-        # Center: record button
-        center_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
-        center_box.set_hexpand(True)
-        center_box.set_halign(Gtk.Align.CENTER)
-        center_box.set_valign(Gtk.Align.CENTER)
+        # Center: status / timer label
+        self.status_label = Gtk.Label(label="")
+        self.status_label.add_css_class("status-label")
+        self.status_label.set_hexpand(True)
+        self.status_label.set_halign(Gtk.Align.CENTER)
+        self.status_label.set_valign(Gtk.Align.CENTER)
+        bottom_bar.append(self.status_label)
 
-        self.record_button = Gtk.Button()
-        self.record_button.add_css_class("record-button")
-        self.record_button.add_css_class("flat")
-        self.record_button.set_valign(Gtk.Align.CENTER)
-        self.record_icon = Gtk.DrawingArea()
-        self.record_icon.set_content_width(36)
-        self.record_icon.set_content_height(36)
-        self.record_icon.set_draw_func(self._draw_record_icon)
-        self.record_button.set_child(self.record_icon)
-        self.record_button.connect("clicked", self._on_record_clicked)
-        center_box.append(self.record_button)
-
-        bottom_bar.append(center_box)
-
-        # Right: timer + status
-        right_box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        # Right: record button
+        right_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
         right_box.set_hexpand(True)
         right_box.set_halign(Gtk.Align.END)
         right_box.set_valign(Gtk.Align.CENTER)
 
-        self.timer_label = Gtk.Label(label="")
-        self.timer_label.add_css_class("timer-label")
-        self.timer_label.set_halign(Gtk.Align.END)
-        right_box.append(self.timer_label)
-
-        self.status_label = Gtk.Label(label="")
-        self.status_label.add_css_class("status-label")
-        self.status_label.set_halign(Gtk.Align.END)
-        right_box.append(self.status_label)
+        self.record_button = Gtk.Button()
+        self.record_button.add_css_class("record-btn")
+        self.record_button.set_valign(Gtk.Align.CENTER)
+        self.record_button.set_margin_end(14)
+        self.record_icon = Gtk.Box()
+        self.record_icon.add_css_class("record-icon-square")
+        self.record_icon.set_halign(Gtk.Align.CENTER)
+        self.record_icon.set_valign(Gtk.Align.CENTER)
+        self.record_button.set_child(self.record_icon)
+        self.record_button.connect("clicked", self._on_record_clicked)
+        right_box.append(self.record_button)
 
         bottom_bar.append(right_box)
 
     def _apply_css(self):
         css = b"""
-        .diary-header {
-            font-size: 13px;
-            color: #8a8a8a;
-            letter-spacing: 1px;
-            margin-bottom: 2px;
+        window {
+            background-color: #0f0f0f;
         }
 
-        .main-area {
-            background-color: #161616;
-            border-radius: 6px;
-        }
-
-        .mode-button {
+        .title-label {
             font-size: 12px;
-            color: #777777;
-            padding: 2px 4px;
-            min-height: 0px;
-            background: none;
-            box-shadow: none;
-            border: none;
-            outline: none;
+            letter-spacing: 3px;
+            color: rgba(255,255,255,0.2);
         }
 
-        .mode-button:focus {
-            outline: none;
-            box-shadow: none;
+        .bottom-bar {
+            background: linear-gradient(to top, rgba(0,0,0,0.85) 0%, rgba(0,0,0,0.4) 60%, transparent 100%);
+            padding-left: 16px;
+            padding-right: 16px;
         }
 
-        .mode-button.active {
-            color: #e6e6e6;
-            text-decoration: underline;
-        }
-
-        .device-dropdown {
-            font-size: 11px;
-            color: #777777;
-            background: none;
-            box-shadow: none;
-            border: none;
-            outline: none;
-            padding: 2px 4px;
-            min-height: 0px;
-        }
-
-        .device-dropdown:focus {
-            outline: none;
-            box-shadow: none;
-        }
-
-        .device-dropdown > button {
-            background: none;
-            box-shadow: none;
-            border: none;
-            outline: none;
-            padding: 2px 4px;
-            min-height: 0px;
-        }
-
-        .record-button {
-            padding: 0px;
-            min-width: 0px;
-            min-height: 0px;
-            background: none;
-            box-shadow: none;
-            border: none;
-            outline: none;
-            border-radius: 999px;
-        }
-
-        .record-button:focus {
-            outline: none;
-            box-shadow: none;
-        }
-
-        .timer-label {
+        .mode-active {
+            color: white;
             font-size: 13px;
-            color: #999999;
-            font-family: monospace;
+            font-weight: 600;
+        }
+
+        .mode-inactive {
+            color: rgba(255,255,255,0.28);
+            font-size: 13px;
+            font-weight: 400;
         }
 
         .status-label {
             font-size: 11px;
-            color: #777777;
+            color: rgba(255,255,255,0.45);
         }
 
         .status-label.error {
-            color: #e05c5c;
+            color: rgba(220,80,80,0.8);
         }
 
         .status-label.success {
-            color: #6fbf73;
+            color: rgba(255,255,255,0.45);
+        }
+
+        .status-label.recording {
+            font-size: 12px;
+            font-weight: 500;
+            color: white;
+        }
+
+        button.record-btn {
+            background: #c0392b;
+            border-radius: 50%;
+            border: none;
+            box-shadow: none;
+            outline: none;
+            min-width: 28px;
+            min-height: 28px;
+            padding: 0;
+        }
+
+        button.record-btn:focus {
+            outline: none;
+            box-shadow: none;
+        }
+
+        button.record-btn.recording {
+            background: transparent;
+            border: 2px solid #c0392b;
+        }
+
+        .record-icon-square {
+            min-width: 8px;
+            min-height: 8px;
+            border-radius: 2px;
+        }
+
+        button.record-btn.recording .record-icon-square {
+            background: #c0392b;
         }
 
         .dialog-field-label {
@@ -425,7 +361,7 @@ class DiaryWindow(Gtk.ApplicationWindow):
     # ------------------------------------------------------------------
     # Mode handling
     # ------------------------------------------------------------------
-    def _on_mode_clicked(self, button, mode):
+    def _on_mode_clicked(self, gesture, n_press, x, y, mode):
         if self.recording:
             return  # switching mode while recording is disabled
         if mode == self.mode:
@@ -447,73 +383,27 @@ class DiaryWindow(Gtk.ApplicationWindow):
 
     def _update_mode_ui(self):
         self.main_stack.set_visible_child_name(self.mode)
-        self.device_stack.set_visible_child_name(self.mode)
 
         if self.mode == "video":
-            self.video_mode_btn.add_css_class("active")
-            self.audio_mode_btn.remove_css_class("active")
+            self.video_mode_label.remove_css_class("mode-inactive")
+            self.video_mode_label.add_css_class("mode-active")
+            self.audio_mode_label.remove_css_class("mode-active")
+            self.audio_mode_label.add_css_class("mode-inactive")
         else:
-            self.audio_mode_btn.add_css_class("active")
-            self.video_mode_btn.remove_css_class("active")
-
-    # ------------------------------------------------------------------
-    # Device selection
-    # ------------------------------------------------------------------
-    def _on_video_device_changed(self, dropdown, _pspec):
-        if not self.video_devices:
-            return
-        idx = dropdown.get_selected()
-        if idx == Gtk.INVALID_LIST_POSITION:
-            return
-        _name, path = self.video_devices[idx]
-        if path == self.selected_video_device:
-            return
-        self.selected_video_device = path
-
-        if self.mode == "video" and not self.recording:
-            self._stop_preview()
-            self._start_preview()
-
-    def _on_audio_device_changed(self, dropdown, _pspec):
-        if not self.audio_devices:
-            return
-        idx = dropdown.get_selected()
-        if idx == Gtk.INVALID_LIST_POSITION:
-            return
-        _name, node_name = self.audio_devices[idx]
-        self.selected_audio_device = node_name
-
-    # ------------------------------------------------------------------
-    # Record icon drawing
-    # ------------------------------------------------------------------
-    def _draw_record_icon(self, area, cr, width, height):
-        cx, cy = width / 2, height / 2
-        radius = min(width, height) / 2 - 2
-
-        if not self.recording:
-            # Idle: solid red circle
-            cr.set_source_rgb(0.85, 0.18, 0.18)
-            cr.arc(cx, cy, radius, 0, 2 * math.pi)
-            cr.fill()
-        else:
-            # Recording: dark circle with red border
-            cr.set_source_rgb(0.09, 0.09, 0.09)
-            cr.arc(cx, cy, radius, 0, 2 * math.pi)
-            cr.fill_preserve()
-            cr.set_source_rgb(0.85, 0.18, 0.18)
-            cr.set_line_width(2.5)
-            cr.arc(cx, cy, radius - 1.5, 0, 2 * math.pi)
-            cr.stroke()
+            self.audio_mode_label.remove_css_class("mode-inactive")
+            self.audio_mode_label.add_css_class("mode-active")
+            self.video_mode_label.remove_css_class("mode-active")
+            self.video_mode_label.add_css_class("mode-inactive")
 
     # ------------------------------------------------------------------
     # Waveform drawing
     # ------------------------------------------------------------------
     def _draw_waveform(self, area, cr, width, height):
-        cr.set_source_rgb(0.086, 0.086, 0.086)
+        cr.set_source_rgb(0.059, 0.059, 0.059)  # #0f0f0f
         cr.paint()
 
-        cr.set_source_rgb(0.92, 0.92, 0.92)
-        cr.set_line_width(1.2)
+        cr.set_source_rgba(1, 1, 1, 1)
+        cr.set_line_width(1)
 
         mid = height / 2
         n = len(self.waveform_history)
@@ -526,14 +416,6 @@ class DiaryWindow(Gtk.ApplicationWindow):
                 cr.move_to(x, mid - y_offset)
             else:
                 cr.line_to(x, mid - y_offset)
-        cr.stroke()
-
-        cr.move_to(0, mid)
-        cr.line_to(width, mid)
-        for i, amp in enumerate(self.waveform_history):
-            x = i * step
-            y_offset = amp * (height * 0.42)
-            cr.line_to(x, mid + y_offset)
         cr.stroke()
 
     # ------------------------------------------------------------------
@@ -639,14 +521,14 @@ class DiaryWindow(Gtk.ApplicationWindow):
             return
 
         self.recording = True
-        self.video_mode_btn.set_sensitive(False)
-        self.audio_mode_btn.set_sensitive(False)
-        self.video_device_dropdown.set_sensitive(False)
-        self.audio_device_dropdown.set_sensitive(False)
+        self.video_mode_label.set_sensitive(False)
+        self.audio_mode_label.set_sensitive(False)
         self.timer_seconds = 0
+        self.blink_visible = True
         self._update_timer_label()
         self.timer_source_id = GLib.timeout_add(1000, self._on_timer_tick)
-        self.record_icon.queue_draw()
+        self.blink_source_id = GLib.timeout_add(1000, self._on_blink_tick)
+        self.record_button.add_css_class("recording")
 
     def _stop_recording(self):
         self.recording = False
@@ -655,29 +537,43 @@ class DiaryWindow(Gtk.ApplicationWindow):
             GLib.source_remove(self.timer_source_id)
             self.timer_source_id = None
 
+        if self.blink_source_id is not None:
+            GLib.source_remove(self.blink_source_id)
+            self.blink_source_id = None
+
         if self.mode == "video":
             self._stop_video_recording()
         else:
             self._stop_audio_recording()
 
-        # restore mode buttons (respect device availability)
-        self.video_mode_btn.set_sensitive(self.video_device_ok)
-        self.audio_mode_btn.set_sensitive(self.audio_device_ok)
-        self.video_device_dropdown.set_sensitive(bool(self.video_devices))
-        self.audio_device_dropdown.set_sensitive(bool(self.audio_devices))
+        # restore mode labels (respect device availability)
+        self.video_mode_label.set_sensitive(self.video_device_ok)
+        self.audio_mode_label.set_sensitive(self.audio_device_ok)
 
-        self.record_icon.queue_draw()
-        self.timer_label.set_label("")
+        self.record_button.remove_css_class("recording")
+        self._clear_status_label()
 
     def _on_timer_tick(self):
         self.timer_seconds += 1
         self._update_timer_label()
         return True
 
+    def _on_blink_tick(self):
+        self.blink_visible = not self.blink_visible
+        self._update_timer_label()
+        return True
+
     def _update_timer_label(self):
         minutes = self.timer_seconds // 60
         seconds = self.timer_seconds % 60
-        self.timer_label.set_label(f"{minutes:02d}:{seconds:02d}")
+        dot_alpha = "100%" if self.blink_visible else "30%"
+        self.status_label.remove_css_class("error")
+        self.status_label.remove_css_class("success")
+        self.status_label.add_css_class("recording")
+        self.status_label.set_markup(
+            f'<span color="white" alpha="{dot_alpha}">●</span>'
+            f' <span color="white">{minutes:02d}:{seconds:02d}</span>'
+        )
 
     # ------------------------------------------------------------------
     # Video recording pipeline
@@ -952,6 +848,7 @@ class DiaryWindow(Gtk.ApplicationWindow):
     def _trigger_upload(self, file_path, title=None, description=""):
         self.status_label.remove_css_class("error")
         self.status_label.remove_css_class("success")
+        self.status_label.remove_css_class("recording")
         self.status_label.set_label("uploading...")
 
         if title is None:
@@ -1024,6 +921,7 @@ class DiaryWindow(Gtk.ApplicationWindow):
         self.status_label.set_label("")
         self.status_label.remove_css_class("success")
         self.status_label.remove_css_class("error")
+        self.status_label.remove_css_class("recording")
         return False
 
     # ------------------------------------------------------------------
