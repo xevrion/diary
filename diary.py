@@ -907,6 +907,10 @@ class DiaryWindow(Gtk.ApplicationWindow):
         self.status_label.set_label("uploaded ✓")
         notify("Diary", f"Uploaded ✓ {filename}")
         GLib.timeout_add(3000, self._clear_status_label)
+
+        if os.path.exists(file_path):
+            os.remove(file_path)
+
         return False
 
     def _on_upload_failed(self, file_path):
