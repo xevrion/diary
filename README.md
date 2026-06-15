@@ -3,76 +3,106 @@
 A minimal native GTK4 desktop app for recording a daily video or audio diary
 entry and automatically uploading it to YouTube as a **private** video.
 
-## Dependencies
+## Getting started
 
-Install system packages:
+### 1. Install dependencies
+
+System packages:
 
 ```bash
 sudo dnf install python3-gobject gtk4 gstreamer1 gstreamer1-plugins-base \
 gstreamer1-plugins-good gstreamer1-plugins-ugly gstreamer1-plugin-libav \
-gstreamer1-plugins-bad-free python3-pip
+gstreamer1-plugins-bad-free python3-pip ffmpeg
 ```
 
-Install Python packages:
+`ffmpeg` is required to mux audio-only recordings with a black video track.
+
+Python packages:
 
 ```bash
 pip install google-api-python-client google-auth-oauthlib
 ```
 
-`ffmpeg` is also required (used to mux audio-only recordings with a black
-video track). On Fedora:
-
-```bash
-sudo dnf install ffmpeg
-```
-
-## Getting `client_secrets.json` from Google Cloud Console
+### 2. Get `client_secrets.json` from Google Cloud Console
 
 1. Go to console.cloud.google.com
-2. Create new project → name it "diary"
-3. APIs & Services → Enable APIs → search "YouTube Data API v3" → Enable
-4. APIs & Services → OAuth consent screen → External → fill App name "diary", save
-5. APIs & Services → Credentials → Create Credentials → OAuth Client ID → Desktop App → name "diary-desktop" → Download JSON → save as ~/diary/client_secrets.json
-6. Run python ~/diary/diary.py — first launch opens browser for one-time auth
+2. Create a new project → name it "diary"
+3. **APIs & Services → Enable APIs** → search "YouTube Data API v3" → Enable
+4. **APIs & Services → OAuth consent screen** → External → fill in App name
+   "diary" → Save
+5. **APIs & Services → Credentials → Create Credentials → OAuth Client ID**
+   → Desktop App → name it "diary-desktop" → Download JSON → save as
+   `~/diary/client_secrets.json`
 
-## Running
+### 3. Run it
 
 ```bash
 python3 ~/diary/diary.py
 ```
 
 On first run:
+
 - `~/diary/` and `~/diary/config.json` are created automatically if missing.
-- If `~/diary/client_secrets.json` is missing, a dialog will tell you where
-  to place it (see steps above).
-- The first time you record and stop, your browser will open for a one-time
+- If `~/diary/client_secrets.json` is missing, a dialog tells you where to
+  place it (see step 2 above).
+- The first time you record and stop, your browser opens for a one-time
   Google OAuth consent. After that, the access token is cached at
   `~/diary/token.json` and refreshed automatically — you won't be asked
   again.
 
 ## Usage
 
-- Switch between **video** and **audio** mode using the labels in the
-  bottom-left of the bar (disabled while recording).
-- A microphone dropdown in the bottom-right lets you pick which audio
-  input device to record from. Your choice is saved to `config.json` and
-  restored automatically next time you open the app.
-- Click the round red button to start recording, click again to stop.
-- While recording, the center of the bar shows a blinking dot and the
-  elapsed time (`● 00:00`).
-- Recordings are saved to `~/diary/YYYY-MM-DD_HH-MM.mp4`.
-- After stopping, a dialog lets you edit the title/description and choose
-  to upload to YouTube (as a **private** video) or save locally only.
-- Upload status ("uploading...", "uploaded ✓", or "upload failed ✗") is
-  shown in the center of the bar, and a desktop notification is sent on
-  success or failure. On a successful upload, the local recording file is
-  deleted automatically; failed uploads are kept locally.
+### Recording controls
 
-## Using your phone as a microphone
+| Control | Location | Behavior |
+| --- | --- | --- |
+| **video** / **audio** labels | Bottom-left | Switch recording mode. Disabled while recording. |
+| Microphone dropdown | Bottom-right | Selects the audio input device. Choice is saved to `config.json` and restored on next launch. |
+| Record button (red circle) | Bottom-right | Click to start recording, click again to stop. |
+| Timer | Center, while recording | Shows a blinking dot and elapsed time as `● 00:00`. |
+
+### Output files
+
+Recordings are saved to:
+
+```
+~/diary/YYYY-MM-DD_HH-MM.mp4
+```
+
+- **Video mode** — H.264 (`openh264enc`) + AAC (`avenc_aac`), muxed to MP4.
+- **Audio mode** — audio is encoded as AAC, then combined with a black
+  1280x720 video track via `ffmpeg` so the result is a valid video file
+  for YouTube.
+
+### After recording
+
+When you stop a recording, a dialog opens with:
+
+- An editable **title** and **description**.
+- **Upload to YouTube** — uploads as a **private** video, or
+- **Save locally only** — keeps the file in `~/diary/` without uploading.
+
+### Upload status
+
+A status indicator appears in the center of the bar, and a desktop
+notification is sent on completion:
+
+| Status | Meaning |
+| --- | --- |
+| `uploading...` | Upload in progress. |
+| `uploaded ✓` | Upload succeeded. The local file is **deleted automatically**. |
+| `upload failed ✗` | Upload failed. The local file is **kept** in `~/diary/`. |
+
+### Startup checks
+
+- If no webcam is found, **video** mode is disabled.
+- If no microphone is found, **audio** mode is disabled.
+
+## How to use your phone as a microphone
 
 The built-in laptop mic and IEM/earbud mics are often too quiet for diary
-recordings. You can use your Android phone's mic as a much better quality
-input source over WiFi, via **AudioRelay** + a PipeWire virtual device.
+recordings. This guide sets up your Android phone as a higher-quality input
+source over WiFi, using **AudioRelay** and a PipeWire virtual device.
 
 ### Prerequisites
 
@@ -83,13 +113,11 @@ input source over WiFi, via **AudioRelay** + a PipeWire virtual device.
    flatpak install flathub net.audiorelay.AudioRelay
    ```
 
-3. Make sure both your phone and laptop are on the **same WiFi network**.
+3. Make sure your phone and laptop are on the **same WiFi network**.
 
-### The `~/use-phone-mic.sh` script
+### Set up the virtual microphone
 
-This script creates a clean PipeWire virtual sink + source pair named
-**"Phone-Mic"**, which AudioRelay streams your phone's audio into, and
-which then shows up as a normal microphone in any app (including Diary).
+Create `~/use-phone-mic.sh`:
 
 ```bash
 #!/bin/bash
@@ -103,23 +131,22 @@ pactl load-module module-remap-source master=audiorelay-virtual-mic-sink.monitor
 echo "✅ Done! Now open AudioRelay → Player → select Phone-Mic → click your phone"
 ```
 
-What it does:
-
-- Unloads any existing `module-null-sink` / `module-remap-source` modules,
-  so re-running it doesn't create duplicate "Phone-Mic2", "Phone-Mic3", etc.
-- Creates a virtual sink called `audiorelay-virtual-mic-sink`, labeled
-  **"Phone-Mic"**.
-- Creates a matching virtual source (remapped from that sink's monitor) so
-  it appears as a regular microphone input — this is what shows up in
-  Diary's mic dropdown and in `pactl list sources`.
-
-Save it to `~/use-phone-mic.sh` and make it executable:
+Make it executable:
 
 ```bash
 chmod +x ~/use-phone-mic.sh
 ```
 
-(Optional) add an alias to your shell config for convenience:
+This script creates a PipeWire virtual sink + source pair named
+**"Phone-Mic"**. AudioRelay streams your phone's audio into the sink, and
+the paired source shows up as a normal microphone in any app — including
+Diary's mic dropdown.
+
+Re-running it first unloads any existing `module-null-sink` /
+`module-remap-source` modules, so you don't end up with duplicates like
+"Phone-Mic2", "Phone-Mic3", etc.
+
+(Optional) add a shell alias for convenience:
 
 ```bash
 alias phonemic="~/use-phone-mic.sh"
@@ -139,18 +166,8 @@ alias phonemic="~/use-phone-mic.sh"
 3. On your **laptop**: open AudioRelay → **Player** tab → set **Audio
    device** to **"Phone-Mic"** → click your phone in the server list to
    connect.
-4. Open the **Diary** app → select **"Phone-Mic"** from the mic dropdown
-   → record as usual.
-
-### Why this approach
-
-- Bluetooth HFP (hands-free/mic) profile wasn't available on this system.
-- The WO Mic Linux client had audio glitches from ALSA loopback buffering
-  issues.
-- AudioRelay uses the Opus codec with proper buffering — clean audio, no
-  glitches.
-- Because it's a virtual PipeWire device, **any** app (Diary, Discord,
-  etc.) can use the phone mic as a normal input.
+4. Open **Diary** → select **"Phone-Mic"** from the mic dropdown → record
+   as usual.
 
 ### Troubleshooting
 
@@ -165,18 +182,22 @@ alias phonemic="~/use-phone-mic.sh"
   ~/use-phone-mic.sh
   ```
 
-- **No audio / silence** — make sure both devices are on the same WiFi
+- **No audio / silence** — confirm both devices are on the same WiFi
   network, and that AudioRelay's laptop **Audio device** is set to
   "Phone-Mic" (not your default speakers/mic).
-- **Audio stops mid-recording** — your phone screen must stay on while
+- **Audio stops mid-recording** — keep your phone screen on while
   recording, since AudioRelay's server needs to run in the foreground.
 
-## Notes
+### Why AudioRelay?
 
-- Video recordings use H.264 (`openh264enc`) + AAC (`avenc_aac`) muxed to
-  MP4.
-- Audio-only recordings are encoded as AAC, then combined with a black
-  1280x720 video track via `ffmpeg` so the result is a valid video file
-  for YouTube.
-- If no webcam is found at startup, video mode is disabled. If no
-  microphone is found, audio mode is disabled.
+A few alternatives were tried before settling on this setup:
+
+- **Bluetooth HFP** (hands-free/mic profile) wasn't available on this
+  system.
+- **WO Mic's Linux client** had audio glitches from ALSA loopback
+  buffering issues.
+- **AudioRelay** uses the Opus codec with proper buffering, giving clean
+  audio with no glitches.
+
+Because the result is a virtual PipeWire device, any app — Diary, Discord,
+or otherwise — can use the phone mic as a normal input, not just Diary.
