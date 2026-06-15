@@ -52,18 +52,124 @@ On first run:
 
 ## Usage
 
-- Switch between **video** and **audio** mode using the buttons in the
-  bottom-left (disabled while recording).
-- A dropdown next to the mode buttons lets you pick which camera or
-  microphone to use.
+- Switch between **video** and **audio** mode using the labels in the
+  bottom-left of the bar (disabled while recording).
+- A microphone dropdown in the bottom-right lets you pick which audio
+  input device to record from. Your choice is saved to `config.json` and
+  restored automatically next time you open the app.
 - Click the round red button to start recording, click again to stop.
-- A timer in the bottom-right shows elapsed recording time.
+- While recording, the center of the bar shows a blinking dot and the
+  elapsed time (`● 00:00`).
 - Recordings are saved to `~/diary/YYYY-MM-DD_HH-MM.mp4`.
-- Immediately after stopping, the recording uploads to YouTube in the
-  background as a **private** video titled `diary — YYYY-MM-DD HH:MM`.
+- After stopping, a dialog lets you edit the title/description and choose
+  to upload to YouTube (as a **private** video) or save locally only.
 - Upload status ("uploading...", "uploaded ✓", or "upload failed ✗") is
-  shown below the record button, and a desktop notification is sent on
-  success or failure.
+  shown in the center of the bar, and a desktop notification is sent on
+  success or failure. On a successful upload, the local recording file is
+  deleted automatically; failed uploads are kept locally.
+
+## Using your phone as a microphone
+
+The built-in laptop mic and IEM/earbud mics are often too quiet for diary
+recordings. You can use your Android phone's mic as a much better quality
+input source over WiFi, via **AudioRelay** + a PipeWire virtual device.
+
+### Prerequisites
+
+1. Install **AudioRelay** on your Android phone (Play Store).
+2. Install AudioRelay on Fedora via Flatpak:
+
+   ```bash
+   flatpak install flathub net.audiorelay.AudioRelay
+   ```
+
+3. Make sure both your phone and laptop are on the **same WiFi network**.
+
+### The `~/use-phone-mic.sh` script
+
+This script creates a clean PipeWire virtual sink + source pair named
+**"Phone-Mic"**, which AudioRelay streams your phone's audio into, and
+which then shows up as a normal microphone in any app (including Diary).
+
+```bash
+#!/bin/bash
+# Clean old ones first
+pactl unload-module module-null-sink 2>/dev/null
+pactl unload-module module-remap-source 2>/dev/null
+sleep 0.5
+# Create one clean virtual mic
+pactl load-module module-null-sink sink_name=audiorelay-virtual-mic-sink sink_properties=device.description=Phone-Mic
+pactl load-module module-remap-source master=audiorelay-virtual-mic-sink.monitor source_name=audiorelay-virtual-mic-sink source_properties=device.description=Phone-Mic
+echo "✅ Done! Now open AudioRelay → Player → select Phone-Mic → click your phone"
+```
+
+What it does:
+
+- Unloads any existing `module-null-sink` / `module-remap-source` modules,
+  so re-running it doesn't create duplicate "Phone-Mic2", "Phone-Mic3", etc.
+- Creates a virtual sink called `audiorelay-virtual-mic-sink`, labeled
+  **"Phone-Mic"**.
+- Creates a matching virtual source (remapped from that sink's monitor) so
+  it appears as a regular microphone input — this is what shows up in
+  Diary's mic dropdown and in `pactl list sources`.
+
+Save it to `~/use-phone-mic.sh` and make it executable:
+
+```bash
+chmod +x ~/use-phone-mic.sh
+```
+
+(Optional) add an alias to your shell config for convenience:
+
+```bash
+alias phonemic="~/use-phone-mic.sh"
+```
+
+### Daily workflow
+
+1. Run the script:
+
+   ```bash
+   ~/use-phone-mic.sh
+   # or: phonemic
+   ```
+
+2. On your **phone**: open AudioRelay → **Server** tab → **Microphone** →
+   **Start**.
+3. On your **laptop**: open AudioRelay → **Player** tab → set **Audio
+   device** to **"Phone-Mic"** → click your phone in the server list to
+   connect.
+4. Open the **Diary** app → select **"Phone-Mic"** from the mic dropdown
+   → record as usual.
+
+### Why this approach
+
+- Bluetooth HFP (hands-free/mic) profile wasn't available on this system.
+- The WO Mic Linux client had audio glitches from ALSA loopback buffering
+  issues.
+- AudioRelay uses the Opus codec with proper buffering — clean audio, no
+  glitches.
+- Because it's a virtual PipeWire device, **any** app (Diary, Discord,
+  etc.) can use the phone mic as a normal input.
+
+### Troubleshooting
+
+- **"Phone-Mic" doesn't show up in Diary's mic dropdown** — re-run
+  `~/use-phone-mic.sh`, then restart Diary so it re-enumerates devices.
+- **Duplicate devices ("Phone-Mic", "Phone-Mic2", ...)** — clean up
+  manually, then re-run the script:
+
+  ```bash
+  pactl unload-module module-null-sink
+  pactl unload-module module-remap-source
+  ~/use-phone-mic.sh
+  ```
+
+- **No audio / silence** — make sure both devices are on the same WiFi
+  network, and that AudioRelay's laptop **Audio device** is set to
+  "Phone-Mic" (not your default speakers/mic).
+- **Audio stops mid-recording** — your phone screen must stay on while
+  recording, since AudioRelay's server needs to run in the foreground.
 
 ## Notes
 

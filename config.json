@@ -1,4 +1,5 @@
 {
     "client_secrets_path": null,
-    "token_path": null
+    "token_path": null,
+    "selected_audio_device": null
 }

@@ -40,6 +40,7 @@ def ensure_config():
         default_config = {
             "client_secrets_path": None,
             "token_path": None,
+            "selected_audio_device": None,
         }
         with open(CONFIG_PATH, "w") as f:
             json.dump(default_config, f, indent=4)
@@ -49,6 +50,19 @@ def ensure_config():
             "~/diary/client_secrets.json before recording, "
             "or set 'client_secrets_path' in config.json."
         )
+
+
+def load_config():
+    try:
+        with open(CONFIG_PATH) as f:
+            return json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def save_config(config):
+    with open(CONFIG_PATH, "w") as f:
+        json.dump(config, f, indent=4)
 
 
 def notify(title, body):
@@ -118,9 +132,16 @@ class DiaryWindow(Gtk.ApplicationWindow):
         # Device enumeration
         self.selected_video_device = VIDEO_DEVICE
         self.audio_devices = list_audio_input_devices()
-        self.selected_audio_device = (
-            self.audio_devices[0][1] if self.audio_devices else None
-        )
+        self.config = load_config()
+
+        saved_audio_device = self.config.get("selected_audio_device")
+        available_nodes = [node for _name, node in self.audio_devices]
+        if saved_audio_device in available_nodes:
+            self.selected_audio_device = saved_audio_device
+        else:
+            self.selected_audio_device = (
+                self.audio_devices[0][1] if self.audio_devices else None
+            )
 
         # Blinking record indicator state
         self.blink_visible = True
@@ -244,11 +265,27 @@ class DiaryWindow(Gtk.ApplicationWindow):
         self.status_label.set_valign(Gtk.Align.CENTER)
         bottom_bar.append(self.status_label)
 
-        # Right: record button
-        right_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL)
+        # Right: mic selector + record button
+        right_box = Gtk.Box(orientation=Gtk.Orientation.HORIZONTAL, spacing=10)
         right_box.set_hexpand(True)
         right_box.set_halign(Gtk.Align.END)
         right_box.set_valign(Gtk.Align.CENTER)
+
+        mic_names = [name for name, _node in self.audio_devices] or ["no microphone"]
+        self.mic_device_model = Gtk.StringList.new(mic_names)
+        self.mic_dropdown = Gtk.DropDown(model=self.mic_device_model)
+        self.mic_dropdown.add_css_class("mic-dropdown")
+        self.mic_dropdown.set_valign(Gtk.Align.CENTER)
+        self.mic_dropdown.set_sensitive(bool(self.audio_devices))
+
+        selected_idx = 0
+        for idx, (_name, node) in enumerate(self.audio_devices):
+            if node == self.selected_audio_device:
+                selected_idx = idx
+                break
+        self.mic_dropdown.set_selected(selected_idx)
+        self.mic_dropdown.connect("notify::selected", self._on_mic_device_changed)
+        right_box.append(self.mic_dropdown)
 
         self.record_button = Gtk.Button()
         self.record_button.add_css_class("record-btn")
@@ -348,6 +385,31 @@ class DiaryWindow(Gtk.ApplicationWindow):
             font-size: 11px;
             color: #8a8a8a;
             letter-spacing: 0.5px;
+        }
+
+        .mic-dropdown {
+            font-size: 11px;
+            color: rgba(255,255,255,0.45);
+            background: none;
+            box-shadow: none;
+            border: none;
+            outline: none;
+            padding: 2px 4px;
+            min-height: 0px;
+        }
+
+        .mic-dropdown:focus {
+            outline: none;
+            box-shadow: none;
+        }
+
+        .mic-dropdown > button {
+            background: none;
+            box-shadow: none;
+            border: none;
+            outline: none;
+            padding: 2px 4px;
+            min-height: 0px;
         }
         """
         provider = Gtk.CssProvider()
@@ -523,6 +585,7 @@ class DiaryWindow(Gtk.ApplicationWindow):
         self.recording = True
         self.video_mode_label.set_sensitive(False)
         self.audio_mode_label.set_sensitive(False)
+        self.mic_dropdown.set_sensitive(False)
         self.timer_seconds = 0
         self.blink_visible = True
         self._update_timer_label()
@@ -549,6 +612,7 @@ class DiaryWindow(Gtk.ApplicationWindow):
         # restore mode labels (respect device availability)
         self.video_mode_label.set_sensitive(self.video_device_ok)
         self.audio_mode_label.set_sensitive(self.audio_device_ok)
+        self.mic_dropdown.set_sensitive(bool(self.audio_devices))
 
         self.record_button.remove_css_class("recording")
         self._clear_status_label()
@@ -574,6 +638,22 @@ class DiaryWindow(Gtk.ApplicationWindow):
             f'<span color="white" alpha="{dot_alpha}">●</span>'
             f' <span color="white">{minutes:02d}:{seconds:02d}</span>'
         )
+
+    # ------------------------------------------------------------------
+    # Mic device selection
+    # ------------------------------------------------------------------
+    def _on_mic_device_changed(self, dropdown, _pspec):
+        if not self.audio_devices:
+            return
+        idx = dropdown.get_selected()
+        if idx == Gtk.INVALID_LIST_POSITION:
+            return
+        _name, node_name = self.audio_devices[idx]
+        if node_name == self.selected_audio_device:
+            return
+        self.selected_audio_device = node_name
+        self.config["selected_audio_device"] = node_name
+        save_config(self.config)
 
     # ------------------------------------------------------------------
     # Video recording pipeline
